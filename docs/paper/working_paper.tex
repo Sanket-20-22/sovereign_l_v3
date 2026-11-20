@@ -1,0 +1,748 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage[expansion=false]{microtype}
+\usepackage{enumitem}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=blue,
+  pdftitle={Deterministic Conservative Integer Routing on Discrete Lattices},
+  pdfauthor={Sanket Hazra}
+}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{remark}{Remark}
+
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\R}{\mathcal{R}}
+\newcommand{\Om}{\Omega}
+
+\title{\bfseries Deterministic Conservative Integer Routing\\
+on Discrete Lattices:\\[0.3em]
+\large A Verified Reference Implementation with a Multilevel Extension}
+
+\author{Sanket Hazra\\
+\small Independent Researcher, Midnapore, West Bengal, India\\
+\small \texttt{sanket8hazra@gmail.com}}
+
+\date{Working paper --- 20 November 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+This paper studies a single primitive: the deterministic distribution of a
+non-negative integer among the $k$ ordered neighbours of a lattice cell such
+that the quantity is preserved exactly and the allocation is as even as
+integer arithmetic allows. The rule is $n = kq + r$ with $q$ given to every
+destination and one additional unit to the first $r$ of them. We establish
+exact conservation, a one-unit bound on allocation imbalance, determinism,
+component bounds and translation invariance; we extend the result from a
+single neighbourhood to a whole lattice under both sequential and simultaneous
+update semantics; we show that conservation survives coincident neighbours on
+a small periodic domain once the conservation scope is de-duplicated; and we
+give a two-level restriction--prolongation scheme whose cycles preserve the
+global total exactly. A reference implementation is described and verified by
+88 automated tests covering 45{,}009 operator cases and full sweeps of
+lattices up to $10^4$ cells at three neighbourhood spacings. We are explicit
+about what is not established: no performance comparison against any existing
+architecture, no hardware realisation, no physical interpretation, and no
+claim of novelty for the routing rule itself, which is the largest-remainder
+rule long known in apportionment theory. The contribution offered here is the
+verified construction, the lattice-level conservation results, the multilevel
+extension, and a characterisation of the rule family identified as the next
+step.
+
+\medskip
+\noindent
+\textbf{Keywords:} discrete lattice; integer routing; conservation;
+quotient--remainder decomposition; multilevel transfer; verified reference
+implementation.
+\end{abstract}
+
+\section{Introduction}
+
+Numerical work on regular lattices is usually expressed in floating point, and
+the resulting state is conserved only to within accumulated rounding. For some
+problems that is the right trade: the physical model itself is continuous and
+the discretisation error dominates. For others the quantity being moved is
+genuinely discrete --- units allocated to processors, tokens assigned to
+replicas, messages counted per route --- and an approximate conservation law is
+a modelling error rather than a numerical one.
+
+This paper takes the second case and asks a narrow question. Given a lattice
+cell holding a non-negative integer, and a fixed ordered set of neighbours, is
+there a routing rule that is (i) exactly conservative, (ii) as balanced as
+integer arithmetic permits, (iii) deterministic, and (iv) invariant under a
+uniform shift of the routed quantity? The answer is yes, the rule is
+elementary, and the interesting content lies not in the rule but in what
+happens when it is applied repeatedly across a lattice, at a boundary, and
+across resolution levels.
+
+The rule is not new. Distributing a remainder one unit at a time to the first
+$r$ destinations is the largest-remainder method of apportionment, in use since
+the eighteenth century and analysed at length by Balinski and Young
+\cite{balinski1982}. We say so plainly at the outset because the opposite
+practice --- presenting a known construction as a discovery --- is the most
+common way work of this kind loses credibility. What we offer instead is a
+verified implementation, a set of lattice-level conservation results that are
+not immediate from the per-cell identity, a multilevel extension with an exact
+conservation guarantee, and a precise statement of the open question that would
+turn the description into a theorem (\S\ref{sec:future}).
+
+\paragraph{What this paper does not claim.}
+It makes no performance claim of any kind. It presents no hardware. It does not
+interpret the lattice as spacetime or as a physical field, and it does not
+claim that integer arithmetic is faster, smaller or more efficient than any
+alternative. Section~\ref{sec:limits} states each of these explicitly, and
+Appendix~\ref{app:withdrawn} records the claims from earlier versions of this
+work that are withdrawn, together with the reason.
+
+\paragraph{Structure.}
+Section~\ref{sec:model} fixes notation and defines the operator.
+Section~\ref{sec:props} proves the per-cell properties.
+Section~\ref{sec:lattice} lifts them to a whole lattice under two update
+semantics. Section~\ref{sec:boundary} treats boundaries and the coincident
+neighbour case. Section~\ref{sec:multi} gives the multilevel scheme.
+Section~\ref{sec:impl} describes the implementation and its verification.
+Sections~\ref{sec:related}--\ref{sec:conclusion} place the work, state its
+limits and identify what would come next.
+
+\section{Model}\label{sec:model}
+
+\begin{definition}[Lattice state]
+Let $d \geq 1$ and $V \subseteq \Z^d$. A \emph{state} assigns to each
+$v \in V$ a non-negative integer $\Om(v) \in \N$. The state is finitely
+supported: $\Om(v) = 0$ for all but finitely many $v$.
+\end{definition}
+
+\begin{definition}[Axial neighbourhood]
+For $v \in \Z^d$ and a spacing $s \in \Z_{\geq 1}$, the axial neighbourhood is
+the ordered tuple
+\begin{equation}
+N_s(v) = \bigl(v + s e_1,\; v - s e_1,\; v + s e_2,\; v - s e_2,\;
+\ldots,\; v + s e_d,\; v - s e_d\bigr),
+\end{equation}
+of length $k = 2d$, where $e_i$ is the $i$-th canonical basis vector. Every
+element lies at $L_1$ distance $s$ from $v$. The ordering is part of the
+definition: the rule below assigns the remainder positionally, so the
+neighbourhood is an ordered tuple and not a set.
+\end{definition}
+
+For $d = 4$ we obtain $k = 8$; for $d = 2$, $k = 4$. Nothing in the analysis
+depends on $d = 4$, and we state results for general $k = 2d$.
+
+\begin{definition}[Routing operator]\label{def:op}
+For $n \in \N$ and $k \geq 1$, write the quotient--remainder decomposition
+\begin{equation}
+n = kq + r, \qquad q = \left\lfloor \frac{n}{k} \right\rfloor, \qquad
+0 \leq r < k .
+\end{equation}
+The routing vector $\R(n) = (R_1(n), \ldots, R_k(n))$ is
+\begin{equation}\label{eq:rule}
+R_i(n) = q + \mathbf{1}[\,i \leq r\,], \qquad i = 1, \ldots, k ,
+\end{equation}
+equivalently $r$ components equal to $q+1$ followed by $k-r$ components equal
+to $q$. For $n = 27$ and $k = 8$,
+\begin{equation}
+\R(27) = (4,4,4,3,3,3,3,3).
+\end{equation}
+\end{definition}
+
+\begin{definition}[Source transition]
+Given a centre $v_c$ with $\Om_c$ and neighbours $N_1, \ldots, N_k$ with states
+$\Om_i$, and an admissible quantity $n \leq \Om_c$,
+\begin{equation}\label{eq:transition}
+\Om_c' = \Om_c - n, \qquad \Om_i' = \Om_i + R_i(n) \quad (i = 1,\ldots,k).
+\end{equation}
+\end{definition}
+
+The operator is a redistribution and not a replication: the source gives up
+exactly the quantity that the destinations receive. Equation
+\eqref{eq:transition} is the entire dynamics. Everything that follows is either
+a consequence of it or a statement about how to apply it.
+
+\section{Properties of the operator}\label{sec:props}
+
+\begin{theorem}[Exact conservation]\label{thm:cons}
+For all $n \in \N$ and $k \geq 1$, $\sum_{i=1}^{k} R_i(n) = n$.
+\end{theorem}
+\begin{proof}
+Exactly $r$ components equal $q+1$ and $k-r$ equal $q$, so the sum is
+$r(q+1) + (k-r)q = kq + r = n$.
+\end{proof}
+
+\begin{theorem}[Bounded imbalance]\label{thm:bal}
+For all $n \in \N$ and $k \geq 1$,
+$\max_i R_i(n) - \min_i R_i(n) \leq 1$. Moreover, no rule satisfying
+Theorem~\ref{thm:cons} with integer components attains a strictly smaller
+maximum imbalance.
+\end{theorem}
+\begin{proof}
+Every component is $q$ or $q+1$ by \eqref{eq:rule}, so the difference is at
+most one. For the second claim: if all $k$ components were equal to some $m$
+then $n = km$, which fails for $k \nmid n$; and if the maximum were $q$ then
+$\sum_i R_i \leq kq < n$, contradicting Theorem~\ref{thm:cons}. Hence some
+component is at least $q+1$ and some at most $q$ whenever $r > 0$, and the
+imbalance of one is forced.
+\end{proof}
+
+\begin{theorem}[Determinism]
+For a fixed ordered neighbourhood, $\R(n)$ is unique for every $n$.
+\end{theorem}
+\begin{proof}
+Euclidean division determines $(q,r)$ uniquely; the fixed ordering then
+determines which positions receive the extra unit.
+\end{proof}
+
+\begin{proposition}[Component bounds]
+For all $i$, $\lfloor n/k \rfloor \leq R_i(n) \leq \lceil n/k \rceil$.
+\end{proposition}
+\begin{proof}
+Immediate from \eqref{eq:rule}: components are $q$ or $q+1$, and $q+1 =
+\lceil n/k \rceil$ when $r>0$.
+\end{proof}
+
+\begin{proposition}[Translation invariance]\label{prop:shift}
+For all $n \in \N$ and $k \geq 1$, $\R(n+k) = \R(n) + \mathbf{1}$, where
+$\mathbf{1}$ is the all-ones vector.
+\end{proposition}
+\begin{proof}
+If $n = kq + r$ with $0 \leq r < k$ then $n + k = k(q+1) + r$, and the same
+$r$ positions receive the extra unit in both cases.
+\end{proof}
+
+\begin{theorem}[Local state conservation]\label{thm:local}
+Let $S = \Om_c + \sum_{i=1}^{k} \Om_i$ be the total over the centre and its
+neighbours, counting each coordinate once. Under \eqref{eq:transition},
+$S' = S$.
+\end{theorem}
+\begin{proof}
+$S' = (\Om_c - n) + \sum_i (\Om_i + R_i(n)) = S - n + \sum_i R_i(n) = S$ by
+Theorem~\ref{thm:cons}.
+\end{proof}
+
+\begin{proposition}[Source non-negativity]
+If $0 \leq n \leq \Om_c$ then $\Om_c' \geq 0$.
+\end{proposition}
+\begin{proof}
+$\Om_c' = \Om_c - n \geq 0$ by hypothesis.
+\end{proof}
+
+\begin{remark}[Admissibility is a precondition, not a conclusion]
+The transition is defined only for $n \leq \Om_c$. A request exceeding the
+source must be refused without partial mutation; the reference implementation
+raises before any write occurs (\S\ref{sec:impl}).
+\end{remark}
+
+\section{Conservation over a lattice}\label{sec:lattice}
+
+Theorem~\ref{thm:local} concerns one neighbourhood. Applying the transition at
+every cell of a lattice requires a decision about update order, and the two
+natural choices give different dynamics. Both are conservative.
+
+\subsection{Sequential update}
+
+Let $V$ be finite and enumerate it as $v^{(1)}, \ldots, v^{(m)}$. A sequential
+sweep applies the transition at $v^{(1)}$, then $v^{(2)}$, and so on, each
+using the state left by its predecessors.
+
+\begin{theorem}[Global conservation, sequential]\label{thm:seq}
+Let $T$ be the total over a finite lattice $V$, with a boundary policy under
+which every neighbour of every $v \in V$ is either in $V$ or is a coordinate
+that the policy maps into $V$. Then one sequential sweep preserves $T$
+exactly.
+\end{theorem}
+\begin{proof}
+Each individual transition preserves the total over the whole lattice: it
+decreases one cell by $n$ and increases others by amounts summing to $n$
+(Theorem~\ref{thm:cons}), and under the stated policy no write leaves $V$.
+A sweep is a finite composition of total-preserving maps, hence preserves $T$.
+\end{proof}
+
+\subsection{Simultaneous update}
+
+A simultaneous sweep computes every transfer from a frozen snapshot and
+applies all of them at once, which is what a parallel machine does.
+
+\begin{theorem}[Global conservation, simultaneous]\label{thm:sim}
+Let $\Om$ be a finitely supported state, let $a(v)$ satisfy $0 \leq a(v) \leq
+\Om(v)$ for all $v$, and let one simultaneous sweep route $a(v)$ from each $v$
+to its axial neighbours. Then the total is unchanged.
+\end{theorem}
+\begin{proof}
+For each $v$ the outgoing shares sum to $a(v)$ by Theorem~\ref{thm:cons} and
+the retained quantity is $\Om(v) - a(v)$; the contribution of $v$ to the new
+total is therefore $a(v) + (\Om(v) - a(v)) = \Om(v)$. Summing over $v$ gives
+the result.
+\end{proof}
+
+\begin{proposition}[Order independence]\label{prop:order}
+The state produced by a simultaneous sweep does not depend on the order in
+which cells are visited.
+\end{proposition}
+\begin{proof}
+Every cell reads the pre-sweep snapshot and writes into a fresh accumulator, so
+the map from old state to new state is a sum of independent per-cell
+contributions.
+\end{proof}
+
+Proposition~\ref{prop:order} is the formal content of the claim that the
+simultaneous variant is the one a parallel implementation would realise. The
+sequential variant is not order independent, and the reference implementation
+exposes both so that the difference is visible rather than assumed.
+
+\section{Boundaries and coincident neighbours}\label{sec:boundary}
+
+\subsection{Boundary policies}
+
+A finite domain requires an explicit policy; without one, routing at the edge
+writes to coordinates that no level owns, and the state leaks away silently
+(we exhibit this in \S\ref{sec:impl}). We distinguish three.
+
+\begin{definition}
+A \emph{periodic} policy identifies coordinates modulo extents
+$(L_1,\ldots,L_d)$ and maps every neighbour into the domain. An
+\emph{absorbing} policy treats coordinates outside the extents as absent, so a
+routing step that would write outside is refused. An \emph{unbounded} policy
+places no restriction and lets the support grow.
+\end{definition}
+
+Under the periodic policy Theorem~\ref{thm:seq} applies directly. Under the
+absorbing policy a step at a face cell is undefined and must be refused; the
+reference implementation raises rather than dropping units, because dropping
+would violate conservation silently.
+
+\subsection{Coincident neighbours}
+
+On a domain small enough, two neighbours of the same cell can be the same
+coordinate. For $d = 4$ with extents $(2,2,2,2)$ and $s = 1$, the displacement
+$+e_i$ and $-e_i$ both land on the same cell, so the eight-entry neighbourhood
+contains four distinct coordinates, each appearing twice.
+
+\begin{lemma}[Accumulation]\label{lem:coincide}
+Let $N_s(v)$ contain a coordinate $u$ with multiplicity $m \geq 1$. Under
+\eqref{eq:transition} the cell $u$ receives $\sum_{j : N_j(v) = u} R_j(n)$,
+and the sum of all receipts over distinct destinations is still $n$.
+\end{lemma}
+\begin{proof}
+The transition adds $R_j(n)$ to the coordinate $N_j(v)$ for each $j$; if
+several $j$ name the same $u$ the additions accumulate. The total added over
+all $j$ is $n$ by Theorem~\ref{thm:cons}, and grouping by distinct destination
+does not change a sum.
+\end{proof}
+
+\begin{corollary}[Invariant survives coincidence]\label{cor:coincide}
+Let $S$ be the total over the \emph{set} $\{v\} \cup \{N_j(v)\}$, counting each
+distinct coordinate once. Then $S' = S$.
+\end{corollary}
+\begin{proof}
+Lemma~\ref{lem:coincide} gives the receipts; the source loses $n$; the
+distinct-destination total gains $n$. The argument of
+Theorem~\ref{thm:local} applies with the sum taken over distinct coordinates.
+\end{proof}
+
+Corollary~\ref{cor:coincide} is a small result with a practical consequence: a
+conservation check that sums a raw neighbour list is incorrect on any domain
+where neighbours can coincide, and it fails in the direction that matters ---
+it reports a violation where there is none. The reference implementation
+de-duplicates the scope and accumulates shares, which is what makes the check
+trustworthy on small domains.
+
+\section{Multilevel transfer}\label{sec:multi}
+
+A hierarchy groups $m$ fine cells under one coarse cell. Two operators move
+state between levels, and both are exact on integers.
+
+\begin{definition}[Hierarchy]
+Let the fine domain have extents $L_j$ divisible by block factors
+$b_j \geq 1$, let $m = \prod_j b_j$, and let the coarse domain have extents
+$L_j / b_j$. The children of a coarse cell $p$ are the $m$ fine cells
+$\{\,p \circ b + t : 0 \leq t_j < b_j\,\}$.
+\end{definition}
+
+\begin{definition}[Restriction and prolongation]
+Restriction sets $\Om_{\mathrm{coarse}}(p) = \sum_{c \in \mathrm{children}(p)}
+\Om(c)$. Prolongation sets the children of $p$ to $\R(\Om_{\mathrm{coarse}}(p))$
+with $k = m$.
+\end{definition}
+
+\begin{proposition}[Restriction is exact]
+Restriction preserves the total.
+\end{proposition}
+\begin{proof}
+The children of distinct parents are disjoint and their union is the fine
+domain, so the sum of parent values equals the sum of child values.
+\end{proof}
+
+\begin{proposition}[Prolongation is exact]
+Prolongation preserves the total.
+\end{proposition}
+\begin{proof}
+Each parent's value is distributed among exactly $m$ children by the operator
+with $k = m$, so the children of $p$ sum to $\Om_{\mathrm{coarse}}(p)$
+(Theorem~\ref{thm:cons}).
+\end{proof}
+
+\begin{theorem}[V-cycle conservation]\label{thm:vcycle}
+A cycle consisting of restriction, any number of simultaneous sweeps at the
+coarse level, and prolongation preserves the fine total exactly.
+\end{theorem}
+\begin{proof}
+Restriction preserves the total; each coarse sweep preserves the coarse total
+by Theorem~\ref{thm:sim}; prolongation preserves the total. Composing three
+total-preserving maps preserves the total.
+\end{proof}
+
+Theorem~\ref{thm:vcycle} is the reason the multilevel extension is worth having.
+A multilevel scheme is often where exactness is quietly lost, because the
+transfer operators are chosen for smoothness rather than for conservation. Here
+both transfers are exact by construction, so the guarantee is inherited rather
+than arranged.
+
+\begin{remark}[A boundary policy is not optional]
+Theorem~\ref{thm:vcycle} requires the coarse level to have a boundary policy.
+If the coarse routing is performed on an unbounded domain, mass is written to
+coordinates outside the coarse domain, no level owns them, and the total falls.
+The reference implementation refuses to construct a hierarchy over an unbounded
+lattice for this reason, and its cycle re-checks the total rather than
+trusting the argument.
+\end{remark}
+
+\section{Reference implementation and verification}\label{sec:impl}
+
+\subsection{Structure}
+
+The implementation is a Python package of seven modules with a strictly
+downward dependency order: lattice memory, then the routing engine, then the
+multilevel layer, with an assembler and machine on top.
+
+\emph{Lattice memory} holds a sparse map from coordinate to non-negative
+integer and resolves every coordinate through a declared boundary policy.
+Totals de-duplicate their argument, so a caller cannot accidentally count a
+cell twice.
+
+\emph{The engine} implements the three operations of the execution model:
+CONNECT binds an ordered neighbourhood and records the invariant baseline,
+RESONATE performs the transition of \eqref{eq:transition}, and COLLAPSE
+re-computes the scope total and compares it with the baseline. COLLAPSE
+mutates nothing. Both update semantics of \S\ref{sec:lattice} are provided.
+
+\emph{The hierarchy} implements restriction, prolongation and the V-cycle of
+\S\ref{sec:multi}, and re-checks the total at the end of each cycle.
+
+\emph{The machine} executes a 17-mnemonic integer instruction set with an
+assembler that range-checks every operand against its declared width. COLLAPSE
+is a trapping instruction: on a failed invariant the machine halts and records
+the violation, so the check lives in the instruction stream rather than in the
+test harness.
+
+\subsection{Verification}
+
+The suite comprises 88 tests and runs in about six seconds on the machine used
+for this paper. It is included in the repository and reproduces every number
+below with a single command.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}p{5.4cm}p{5.6cm}p{3.2cm}@{}}
+\toprule
+Property & Scope of the check & Result \\
+\midrule
+Operator conservation & exhaustive, $k = 2..10$, $n = 0..5000$ (45{,}009 cases) & exact \\
+Bounded imbalance & exhaustive, same range & $\leq 1$ \\
+Component bounds & exhaustive, same range & holds \\
+Remainder count & exhaustive, same range & holds \\
+Translation invariance & $n \in \{0,3,27,1000\}$, $k = 8$ & holds \\
+\midrule
+Local conservation & 5{,}000 randomised routes, $n \leq 10^6$ & 0 failures \\
+Global conservation, sequential & tori of $4^4$, $8^4$, $10^4$ cells & exact \\
+Global conservation, simultaneous & tori of $4^4$, $8^4$, $10^4$ cells & exact \\
+Order independence & forwards vs.\ reversed visit order & identical state \\
+Spacing invariance & $s \in \{1,2,3\}$ on an $8^4$ torus & exact \\
+\midrule
+Coincident neighbours & $2^4$ torus, 8 links, 4 distinct cells & invariant holds \\
+MMU aliasing & two coordinates to one frame & rejected \\
+\midrule
+V-cycle conservation & extents 4 and 8, repeated cycles & exact \\
+V-cycle without boundary & coarse level unbounded & refused, loss reported \\
+\midrule
+Assembler and machine & 22 cases incl.\ a trapping program & all pass \\
+\bottomrule
+\end{tabular}
+\caption{Verification scope. Every row is a test in the repository; the test
+log is generated by the runner rather than written by hand.}
+\label{tab:verify}
+\end{table}
+
+\subsection{Measured behaviour}
+
+Table~\ref{tab:timing} reports timings of the Python reference implementation.
+These figures characterise this implementation and nothing else. They are not a
+comparison with any other system, and they carry no information about what a
+native implementation or a dedicated circuit would achieve.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Operation & Cells & Rate \\
+\midrule
+CONNECT + RESONATE pairs, unbounded lattice & --- & 9{,}700 routes/s \\
+Sequential sweep, periodic $4^4$ torus & 256 & 4{,}917 cells/s \\
+Sequential sweep, periodic $8^4$ torus & 4{,}096 & 4{,}493 cells/s \\
+Sequential sweep, periodic $10^4$ torus & 10{,}000 & 3{,}868 cells/s \\
+Simultaneous sweep, periodic $8^4$ torus & 4{,}096 & 10{,}175 cells/s \\
+Simultaneous sweep, periodic $10^4$ torus & 10{,}000 & 9{,}126 cells/s \\
+V-cycle, block $2^4$, extent 4 & 256 & 3.9 ms/cycle \\
+V-cycle, block $2^4$, extent 8 & 4{,}096 & 72.6 ms/cycle \\
+\bottomrule
+\end{tabular}
+\caption{Timings of the Python reference implementation, single core,
+measured by \texttt{examples/bench.py}. The simultaneous sweep is faster
+because it writes one accumulator per target rather than re-reading cells.
+All runs conserved the total exactly.}
+\label{tab:timing}
+\end{table}
+
+\subsection{A leak that the tests catch}
+
+The multilevel module is instructive about why the boundary policy must be
+explicit. Constructing a hierarchy over a periodic $4^4$ domain, then replacing
+the coarse memory with an unbounded one and running a cycle, halves the total:
+$2{,}560 \to 1{,}280$. The coarse routing writes to parent coordinates outside
+the coarse domain; the unbounded policy creates them; no level sums them; the
+state is gone, with no error raised by the arithmetic. The cycle compares the
+fine total before and after and raises, which converts a silent corruption into
+a reported failure. This is the only reason the module re-checks a total that
+Theorem~\ref{thm:vcycle} already guarantees: the theorem's hypotheses include a
+condition that a caller can violate by configuration.
+
+\section{Related work}\label{sec:related}
+
+\paragraph{Apportionment.} The rule \eqref{eq:rule} is the largest-remainder
+method: allocate the floor to each party, then distribute the remaining seats
+to those with the largest fractional parts. Its properties, its history and its
+pathologies are treated by Balinski and Young \cite{balinski1982}. Their
+analysis is the correct reference point for the per-cell results of
+\S\ref{sec:props}, and we do not claim those results as new. What differs here
+is the setting: the rule is used as a local transport operator on a lattice
+rather than as a one-shot allocation among a fixed set of parties, which is
+what makes the lattice-level and multilevel results of
+\S\ref{sec:lattice}--\ref{sec:multi} available.
+
+\paragraph{Lattice gas and cellular automata.} Conservative lattice automata
+with integer states have a long history, including lattice gas automata for
+fluid simulation \cite{frisch1986} and the broader study of cellular automata
+\cite{wolfram2002}. Those models typically conserve a vector of discrete
+quantities through collision rules that are local and reversible. The present
+operator is simpler --- it conserves a single scalar and is not reversible ---
+and should be read as a transport primitive rather than as a physical model.
+
+\paragraph{Integer and exact arithmetic.} The absence of rounding error is a
+property of integer arithmetic and not an achievement of this construction. The
+relevant comparison is with fixed-point and rational arithmetic, where exactness
+is also available and where the cost of wider representations has been studied
+extensively \cite{yates2013}.
+
+\paragraph{Multigrid.} Restriction and prolongation are the standard multigrid
+transfer operators \cite{briggs2000}, usually chosen as weighted averages and
+adjoints. Choosing them to be exact on integers instead --- a sum and a split
+--- gives up smoothing quality in exchange for exact conservation. We make no
+claim that the resulting scheme is an efficient solver; we claim only that its
+cycles are conservative, which is what Theorem~\ref{thm:vcycle} establishes.
+
+\section{Limitations}\label{sec:limits}
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{No performance result.} There is no comparison with any existing
+system, and the timings in Table~\ref{tab:timing} describe a Python reference
+implementation only.
+
+\item \textbf{No hardware.} The instruction set of \S\ref{sec:impl} is a
+specification. No circuit has been built, synthesised or measured, and the
+paper draws no conclusion about feasibility, area, frequency or power.
+
+\item \textbf{No physical interpretation.} The lattice is a data structure.
+Nothing here establishes that it models spacetime, energy, thermodynamics or
+entropy, and no physical quantity is claimed to be conserved.
+
+\item \textbf{The operator is a smoother, not a solver.} Repeated sweeps drive
+a periodic domain towards the uniform state. That is the behaviour of a
+conservative averaging operator and it does not solve any physical problem.
+
+\item \textbf{Novelty is limited and stated.} The routing rule is the
+largest-remainder rule. The per-cell properties of \S\ref{sec:props} follow
+from it directly. The contributions this paper can defend are the lattice-level
+results, the coincident-neighbour lemma, the multilevel conservation theorem,
+and the verified implementation.
+
+\item \textbf{Verification is testing, not proof.} The exhaustive checks cover
+$k \leq 10$ and $n \leq 5000$; the randomised checks cover larger values. The
+theorems are proved, but the correspondence between the theorems and the code is
+established by test, not by formal refinement.
+
+\item \textbf{Sequential update is order dependent.} Proposition~\ref{prop:order}
+holds only for the simultaneous variant. Any result that depends on the
+sequential dynamics must state the visiting order.
+
+\item \textbf{Absorbing boundaries refuse rather than redistribute.} A routing
+step at a face cell is an error under the absorbing policy. Whether that is the
+right semantics for a bounded problem is a modelling question this paper does
+not settle.
+\end{enumerate}
+
+\section{Future work}\label{sec:future}
+
+One item is a genuine research question and the rest are engineering.
+
+\paragraph{Classification of the rule family.} Characterise all maps
+$\R : \N \to \N^k$ that are conservative (Theorem~\ref{thm:cons}), balanced to
+within one (Theorem~\ref{thm:bal}), deterministic, and translation invariant in
+the sense of Proposition~\ref{prop:shift}. The conjecture is that the family is
+exactly the orderings of \eqref{eq:rule}: that any rule with these four
+properties must be the largest-remainder rule composed with a permutation of
+the destinations. If that holds, the operator is not one choice among many but
+the only one, and the paper's contribution becomes a characterisation rather
+than a description. This is the single result most likely to make the work
+publishable in a discrete-mathematics venue, and it is the first item in the
+project's plan.
+
+\paragraph{Convergence of repeated sweeps.} The measured spread decreases
+monotonically under repeated simultaneous sweeps. The rate, the conditions for
+reaching uniformity exactly rather than asymptotically, and the dependence on
+the spacing $s$ are open.
+
+\paragraph{Boundary theory.} Reflecting and absorbing boundaries interact with
+the invariant in ways not analysed here; the absorbing case currently refuses
+rather than redistributes.
+
+\paragraph{A native implementation with a fair baseline.} The performance
+question cannot be answered in Python. It requires a C or Rust kernel, a
+cache-blocked integer baseline solving the same problem, and measurement with
+hardware counters rather than synthetic ones. The project plan treats this as a
+gate: if the integer formulation does not beat the baseline on a real workload,
+the accelerator line of work ends and the mathematics is published on its own.
+
+\paragraph{A hardware prototype, conditionally.} The arithmetic is
+gate-friendly: the routing is a three-bit shift, a one-hot remainder mask and
+$k$ adders, and the invariant check is an adder tree and a comparator. Whether
+that is worth building depends entirely on the previous item.
+
+\section{Conclusion}\label{sec:conclusion}
+
+The operator studied here is elementary: split an integer by the neighbourhood
+size, distribute the quotient, hand the remainder out one unit at a time. Its
+per-cell properties are immediate consequences of Euclid's division lemma, and
+the rule itself is two centuries old.
+
+What is not immediate is how the operator behaves when it is the local rule of a
+whole lattice. Conservation survives both update orders; it survives
+coincident neighbours on a small periodic domain, provided the conservation
+scope is de-duplicated; and it survives a two-level restriction--prolongation
+cycle, because both transfer operators are exact rather than approximate. Those
+results, together with a verified implementation and an explicit statement of
+what is not claimed, are what this paper offers.
+
+The honest summary is that the mathematics is small and sound, and the
+engineering question --- whether conservative integer transport is worth
+accelerating --- is open and answerable. Answering it is the next step, and it
+is the step that decides whether the work matters beyond its own correctness.
+
+\appendix
+
+\section{Withdrawn claims}\label{app:withdrawn}
+
+Earlier versions of this work, circulated as a thesis, a whitepaper and a
+manuscript submission, contained claims that the accompanying code did not
+support. They are recorded here so that anyone comparing versions understands
+what changed. Each was checked against the implementation and withdrawn.
+
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Reductions of 87.50\%, 89.47\% and 94.44\% in data-bus traffic.}
+These were ratios of transaction counters incremented by hand-written
+constants in the measurement code, not measurements of memory traffic. The
+three figures came from three different constant assignments and none was
+reproducible from the shipped code. Withdrawn in full. No replacement figure is
+offered, because none was measured.
+
+\item \textbf{``0.00\% rounding drift'' as an architectural property.} True of
+any integer arithmetic and not specific to this construction. Restated as a
+property of the representation rather than a result.
+
+\item \textbf{Axial routing described as four-dimensional while the code used
+Moore neighbourhoods.} The simulations returned four
+orthogonal plus four diagonal cells. The code and the description disagreed;
+the description is corrected here and the neighbourhood is now derived from the
+dimension.
+
+\item \textbf{A self-hosting bare-metal compiler and kernel.} The artifacts were
+a pseudo-assembly listing with no executor, an assembler that compiled a
+hardcoded three-line string and could not parse that listing, and a 37-byte
+binary. Withdrawn. What replaces it is a specification and a working assembler
+and machine, with no claim of hardware realisation.
+
+\item \textbf{Physical interpretation: imaginary-mass modes, a cosmological
+singularity reset, and a consciousness decomposition of an energy equation.}
+These have no counterpart in the code and no derivation. Withdrawn in full.
+
+\item \textbf{Applications to planetary atmospheric modelling and exascale
+physics.} The demonstrated operator is a conservative smoother. No atmospheric
+model was built or validated. Withdrawn.
+
+\item \textbf{``Neuromorphic'' and ``unified field'' as descriptors.} The
+construction involves no spiking dynamics, no plasticity and no field theory.
+The names are retained only where they refer to the historical project and
+carry no technical claim.
+\end{enumerate}
+
+\begin{thebibliography}{9}
+
+\bibitem{balinski1982}
+M.~L. Balinski and H.~P. Young,
+\emph{Fair Representation: Meeting the Ideal of One Man, One Vote},
+Yale University Press, 1982.
+
+\bibitem{frisch1986}
+U.~Frisch, B.~Hasslacher and Y.~Pomeau,
+``Lattice-gas automata for the Navier--Stokes equation,''
+\emph{Physical Review Letters}, vol.~56, no.~14, pp.~1505--1508, 1986.
+
+\bibitem{wolfram2002}
+S.~Wolfram,
+\emph{A New Kind of Science}, Wolfram Media, 2002.
+
+\bibitem{briggs2000}
+W.~L. Briggs, V.~E. Henson and S.~F. McCormick,
+\emph{A Multigrid Tutorial}, 2nd ed., SIAM, 2000.
+
+\bibitem{yates2013}
+R.~Yates,
+``Fixed-point arithmetic: an introduction,''
+Digital Signal Labs, technical reference, 2013.
+
+\bibitem{knuth1997}
+D.~E. Knuth,
+\emph{The Art of Computer Programming, Volume 1: Fundamental Algorithms},
+3rd ed., Addison--Wesley, 1997.
+
+\end{thebibliography}
+
+\end{document}
